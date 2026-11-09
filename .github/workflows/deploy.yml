@@ -1,0 +1,99 @@
+# Builds the Kratos site from development-branch of the main repo and publishes it on this repo's
+# GitHub Pages: https://kratos-the-rover.github.io/preview-site/
+#
+# No secrets needed: the main repo is public, so it can be read anonymously, and publishing here uses
+# this repo's own GITHUB_TOKEN. Runs every 15 minutes and only rebuilds when development-branch has
+# new commits; use "Run workflow" on the Actions tab to rebuild immediately.
+
+name: Build preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: Kratos-The-Rover/Kratos-The-Rover.github.io
+  SOURCE_BRANCH: development-branch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+      sha: ${{ steps.src.outputs.sha }}
+    steps:
+      - name: Latest commit on the source branch
+        id: src
+        run: echo "sha=$(git ls-remote "https://github.com/$SOURCE_REPO" "refs/heads/$SOURCE_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Was that commit already published?
+        id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .deployed
+          key: deployed-${{ steps.src.outputs.sha }}
+          lookup-only: true
+
+      # Scheduled runs skip unchanged commits; manual runs and pushes here always rebuild.
+      - name: Decide
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.seen.outputs.cache-hit }}" = "true" ]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.go == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ steps.src.outputs.sha }}
+
+      - if: steps.check.outputs.go == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - if: steps.check.outputs.go == 'true'
+        run: npm ci
+
+      # Served under /preview-site/, so every asset URL needs that prefix.
+      - if: steps.check.outputs.go == 'true'
+        run: npx vite build --base="/${{ github.event.repository.name }}/"
+
+      - if: steps.check.outputs.go == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      # Remember this commit so the schedule doesn't rebuild it again.
+      - run: mkdir -p .deployed && echo "${{ needs.build.outputs.sha }}" > .deployed/sha
+      - uses: actions/cache/save@v4
+        with:
+          path: .deployed
+          key: deployed-${{ needs.build.outputs.sha }}
